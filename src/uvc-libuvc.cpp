@@ -81,6 +81,13 @@ namespace rsimpl
         int get_vendor_id(const device & device) { return device.vid; }
         int get_product_id(const device & device) { return device.pid; }
 
+        const char * get_usb_port_id(const device & device)
+        {
+            std::string usb_port = std::to_string(libusb_get_bus_number(device.uvcdevice->usb_dev)) + "-" +
+                std::to_string(libusb_get_port_number(device.uvcdevice->usb_dev));
+            return usb_port.c_str();
+        }
+
         void get_control(const device & dev, const extension_unit & xu, uint8_t ctrl, void * data, int len)
         {
             int status = uvc_get_ctrl(const_cast<device &>(dev).get_subdevice(xu.subdevice).handle, xu.unit, ctrl, data, len, UVC_GET_CUR);
@@ -100,17 +107,34 @@ namespace rsimpl
             device.claimed_interfaces.push_back(interface_number);
         }
 
-        void bulk_transfer(device & device, unsigned char endpoint, void * data, int length, int *actual_length, unsigned int timeout)
+        void claim_aux_interface(device & device, const guid & interface_guid, int interface_number)
         {
+            throw std::logic_error("claim_aux_interface(...) is not implemented for this backend ");
+        }
+
+        void power_on_adapter_board()
+        {
+            throw std::logic_error("power_on_adapter_board(...) is not implemented for this backend ");
+        }
+
+        void bulk_transfer(device & device, unsigned char handle_id, unsigned char endpoint, void * data, int length, int *actual_length, unsigned int timeout)
+        {
+            if(0 !=handle_id) throw std::logic_error("bulk_transfer for auxillary interface is not supported for this backend");
             int status = libusb_bulk_transfer(device.get_subdevice(0).handle->usb_devh, endpoint, (unsigned char *)data, length, actual_length, timeout);
             if(status < 0) throw std::runtime_error(to_string() << "libusb_bulk_transfer(...) returned " << libusb_error_name(status));
         }
 
-        void set_subdevice_mode(device & device, int subdevice_index, int width, int height, uint32_t fourcc, int fps, std::function<void(const void * frame)> callback)
+        void set_subdevice_mode(device & device, int subdevice_index, int width, int height, uint32_t fourcc, int fps, std::function<void(const void * frame, std::function<void()> continuation)> callback)
         {
-            auto & sub = device.get_subdevice(subdevice_index);
-            check("get_stream_ctrl_format_size", uvc_get_stream_ctrl_format_size(sub.handle, &sub.ctrl, reinterpret_cast<const big_endian<uint32_t> &>(fourcc), width, height, fps));
-            sub.callback = callback;
+            throw std::logic_error("set_subdevice_mode(...) is not implemented for this backend ");
+//            auto & sub = device.get_subdevice(subdevice_index);
+//            check("get_stream_ctrl_format_size", uvc_get_stream_ctrl_format_size(sub.handle, &sub.ctrl, reinterpret_cast<const big_endian<uint32_t> &>(fourcc), width, height, fps));
+//            sub.callback = callback;
+        }
+
+        void set_subdevice_data_channel_handler(device & device, int subdevice_index, std::function<void(const unsigned char * data, const int size)> callback)
+        {
+            throw std::logic_error("set_subdevice_data_channel_handler(...) is not implemented for this backend ");
         }
 
         void start_streaming(device & device, int num_transfer_bufs)
@@ -142,6 +166,16 @@ namespace rsimpl
             }
         }
 
+        void start_data_acquisition(device & device)
+        {
+            throw std::logic_error("start_data_acquisition(...) is not implemented for this backend ");
+        }
+
+        void stop_data_acquisition(device & device)
+        {
+            throw std::logic_error("start_data_acquisition(...) is not implemented for this backend ");
+        }
+
         template<class T> void set_pu(uvc_device_handle_t * devh, int subdevice, uint8_t unit, uint8_t control, int value)
         {
             const int REQ_TYPE_SET = 0x21;
@@ -166,37 +200,44 @@ namespace rsimpl
             if(sizeof(T)==4) return DW_TO_INT(buffer);
         }
         
-        template<class T> void get_pu_range(uvc_device_handle_t * devh, int subdevice, uint8_t unit, uint8_t control, int * min, int * max)
+        template<class T> void get_pu_range(uvc_device_handle_t * devh, int subdevice, uint8_t unit, uint8_t control, int * min, int * max, int * step, int * def)
         {
-            if(min) *min = get_pu<T>(devh, subdevice, unit, control, UVC_GET_MIN);
-            if(max) *max = get_pu<T>(devh, subdevice, unit, control, UVC_GET_MAX);
+            if(min)     *min    = get_pu<T>(devh, subdevice, unit, control, UVC_GET_MIN);
+            if(max)     *max    = get_pu<T>(devh, subdevice, unit, control, UVC_GET_MAX);
+            if(step)    *step   = get_pu<T>(devh, subdevice, unit, control, UVC_GET_RES);
+            if(def)     *def    = get_pu<T>(devh, subdevice, unit, control, UVC_GET_DEF);
         }
 
-        void get_pu_control_range(const device & device, int subdevice, rs_option option, int * min, int * max)
+        void get_pu_control_range(const device & device, int subdevice, rs_option option, int * min, int * max, int * step, int * def)
         {
             auto handle = const_cast<uvc::device &>(device).get_subdevice(subdevice).handle;
             int ct_unit = 0, pu_unit = 0;
             for(auto ct = uvc_get_input_terminals(handle); ct; ct = ct->next) ct_unit = ct->bTerminalID; // todo - Check supported caps
             for(auto pu = uvc_get_processing_units(handle); pu; pu = pu->next) pu_unit = pu->bUnitID; // todo - Check supported caps
-            
+
             switch(option)
             {
-            case RS_OPTION_COLOR_BACKLIGHT_COMPENSATION: return get_pu_range<uint16_t>(handle, subdevice, pu_unit, UVC_PU_BACKLIGHT_COMPENSATION_CONTROL, min, max);
-            case RS_OPTION_COLOR_BRIGHTNESS: return get_pu_range<int16_t>(handle, subdevice, pu_unit, UVC_PU_BRIGHTNESS_CONTROL, min, max);
-            case RS_OPTION_COLOR_CONTRAST: return get_pu_range<uint16_t>(handle, subdevice, pu_unit, UVC_PU_CONTRAST_CONTROL, min, max);
-            case RS_OPTION_COLOR_EXPOSURE: return get_pu_range<uint32_t>(handle, subdevice, ct_unit, UVC_CT_EXPOSURE_TIME_ABSOLUTE_CONTROL, min, max);
-            case RS_OPTION_COLOR_GAIN: return get_pu_range<uint16_t>(handle, subdevice, pu_unit, UVC_PU_GAIN_CONTROL, min, max);
-            case RS_OPTION_COLOR_GAMMA: return get_pu_range<uint16_t>(handle, subdevice, pu_unit, UVC_PU_GAMMA_CONTROL, min, max);
-            case RS_OPTION_COLOR_HUE: if(min) *min = 0; if(max) *max = 0; return; //return get_pu_range<int16_t>(handle, subdevice, pu_unit, UVC_PU_HUE_CONTROL, min, max);
-            case RS_OPTION_COLOR_SATURATION: return get_pu_range<uint16_t>(handle, subdevice, pu_unit, UVC_PU_SATURATION_CONTROL, min, max);
-            case RS_OPTION_COLOR_SHARPNESS: return get_pu_range<uint16_t>(handle, subdevice, pu_unit, UVC_PU_SHARPNESS_CONTROL, min, max);
-            case RS_OPTION_COLOR_WHITE_BALANCE: return get_pu_range<uint16_t>(handle, subdevice, pu_unit, UVC_PU_WHITE_BALANCE_TEMPERATURE_CONTROL, min, max);
-            case RS_OPTION_COLOR_ENABLE_AUTO_EXPOSURE: if(min) *min = 0; if(max) *max = 1; return; // The next 2 options do not support range operations
-            case RS_OPTION_COLOR_ENABLE_AUTO_WHITE_BALANCE: if(min) *min = 0; if(max) *max = 1; return;
+            case RS_OPTION_COLOR_BACKLIGHT_COMPENSATION: return get_pu_range<uint16_t>(handle, subdevice, pu_unit, UVC_PU_BACKLIGHT_COMPENSATION_CONTROL, min, max, step, def);
+            case RS_OPTION_COLOR_BRIGHTNESS: return get_pu_range<int16_t>(handle, subdevice, pu_unit, UVC_PU_BRIGHTNESS_CONTROL, min, max, step, def);
+            case RS_OPTION_COLOR_CONTRAST: return get_pu_range<uint16_t>(handle, subdevice, pu_unit, UVC_PU_CONTRAST_CONTROL, min, max, step, def);
+            case RS_OPTION_COLOR_EXPOSURE: return get_pu_range<uint32_t>(handle, subdevice, ct_unit, UVC_CT_EXPOSURE_TIME_ABSOLUTE_CONTROL, min, max, step, def);
+            case RS_OPTION_COLOR_GAIN: return get_pu_range<uint16_t>(handle, subdevice, pu_unit, UVC_PU_GAIN_CONTROL, min, max, step, def);
+            case RS_OPTION_COLOR_GAMMA: return get_pu_range<uint16_t>(handle, subdevice, pu_unit, UVC_PU_GAMMA_CONTROL, min, max, step, def);
+            case RS_OPTION_COLOR_HUE: if(min) *min = 0; if(max) *max = 0; return; //return get_pu_range<int16_t>(handle, subdevice, pu_unit, UVC_PU_HUE_CONTROL, min, max, step, def);
+            case RS_OPTION_COLOR_SATURATION: return get_pu_range<uint16_t>(handle, subdevice, pu_unit, UVC_PU_SATURATION_CONTROL, min, max, step, def);
+            case RS_OPTION_COLOR_SHARPNESS: return get_pu_range<uint16_t>(handle, subdevice, pu_unit, UVC_PU_SHARPNESS_CONTROL, min, max, step, def);
+            case RS_OPTION_COLOR_WHITE_BALANCE: return get_pu_range<uint16_t>(handle, subdevice, pu_unit, UVC_PU_WHITE_BALANCE_TEMPERATURE_CONTROL, min, max, step, def);
+            case RS_OPTION_COLOR_ENABLE_AUTO_EXPOSURE: if(min) *min = 0; if(max) *max = 1; if (step) *step = 1; if (def) *def = 1; return; // The next 2 options do not support range operations
+            case RS_OPTION_COLOR_ENABLE_AUTO_WHITE_BALANCE: if(min) *min = 0; if(max) *max = 1; if (step) *step = 1; if (def) *def = 1; return;
             default: throw std::logic_error("invalid option");
             }
+        }        
+
+        void get_extension_control_range(const device & device, const extension_unit & xu, char control, int * min, int * max, int * step, int * def)
+        {
+            throw std::logic_error("get_extension_control_range(...) is not implemented for this backend ");
         }
-        
+
         void set_pu_control(device & device, int subdevice, rs_option option, int value)
         {            
             auto handle = device.get_subdevice(subdevice).handle;
@@ -254,6 +295,12 @@ namespace rsimpl
         std::shared_ptr<context> create_context()
         {
             return std::make_shared<context>();
+        }
+
+        bool is_device_connected(device & device, int vid, int pid)
+        {
+            throw std::logic_error("is_device_connected(...) is not implemented for this backend ");
+            return false;
         }
 
         std::vector<std::shared_ptr<device>> query_devices(std::shared_ptr<context> context)

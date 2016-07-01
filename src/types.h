@@ -10,6 +10,7 @@
 #define LIBREALSENSE_TYPES_H
 
 #include "../include/librealsense/rs.h"     // Inherit all type definitions in the public API
+#include "../include/librealsense/rscore.hpp" // Inherit public interfaces
 
 #include <cassert>                          // For assert
 #include <cstring>                          // For memcmp
@@ -17,8 +18,12 @@
 #include <sstream>                          // For ostringstream
 #include <mutex>                            // For mutex, unique_lock
 #include <condition_variable>               // For condition_variable
+#include <memory>                           // For unique_ptr
 
-#define RS_STREAM_NATIVE_COUNT 4
+#define RS_STREAM_NATIVE_COUNT 5
+#define RS_CHANNEL_NATIVE_COUNT 1
+
+#define RS_USER_QUEUE_SIZE 64
 
 namespace rsimpl
 {
@@ -26,7 +31,7 @@ namespace rsimpl
     // Utility types for general use //
     ///////////////////////////////////
 
-    enum class byte : uint8_t {};
+    typedef uint8_t byte;
 
     struct to_string
     {
@@ -35,7 +40,7 @@ namespace rsimpl
         operator std::string() const { return ss.str(); }
     };
 
-    #pragma pack(push, 1)
+#pragma pack(push, 1)
     template<class T> class big_endian
     {
         T be_value;
@@ -43,11 +48,11 @@ namespace rsimpl
         operator T () const
         {
             T le_value = 0;
-            for(int i=0; i<sizeof(T); ++i) reinterpret_cast<char *>(&le_value)[i] = reinterpret_cast<const char *>(&be_value)[sizeof(T)-i-1];
+            for (unsigned int i = 0; i < sizeof(T); ++i) reinterpret_cast<char *>(&le_value)[i] = reinterpret_cast<const char *>(&be_value)[sizeof(T) - i - 1];
             return le_value;
         }
     };
-    #pragma pack(pop)
+#pragma pack(pop)
 
     ///////////////////////
     // Logging mechanism //
@@ -58,18 +63,18 @@ namespace rsimpl
     void log_to_file(rs_log_severity min_severity, const char * file_path);
     extern rs_log_severity minimum_log_severity;
 
-    #define LOG(SEVERITY, ...) do { if(static_cast<int>(SEVERITY) >= rsimpl::minimum_log_severity) { std::ostringstream ss; ss << __VA_ARGS__; rsimpl::log(SEVERITY, ss.str()); } } while(false)
-    #define LOG_DEBUG(...)   LOG(RS_LOG_SEVERITY_DEBUG, __VA_ARGS__)
-    #define LOG_INFO(...)    LOG(RS_LOG_SEVERITY_INFO,  __VA_ARGS__)
-    #define LOG_WARNING(...) LOG(RS_LOG_SEVERITY_WARN,  __VA_ARGS__)
-    #define LOG_ERROR(...)   LOG(RS_LOG_SEVERITY_ERROR, __VA_ARGS__)
-    #define LOG_FATAL(...)   LOG(RS_LOG_SEVERITY_FATAL, __VA_ARGS__)
+#define LOG(SEVERITY, ...) do { if(static_cast<int>(SEVERITY) >= rsimpl::minimum_log_severity) { std::ostringstream ss; ss << __VA_ARGS__; rsimpl::log(SEVERITY, ss.str()); } } while(false)
+#define LOG_DEBUG(...)   LOG(RS_LOG_SEVERITY_DEBUG, __VA_ARGS__)
+#define LOG_INFO(...)    LOG(RS_LOG_SEVERITY_INFO,  __VA_ARGS__)
+#define LOG_WARNING(...) LOG(RS_LOG_SEVERITY_WARN,  __VA_ARGS__)
+#define LOG_ERROR(...)   LOG(RS_LOG_SEVERITY_ERROR, __VA_ARGS__)
+#define LOG_FATAL(...)   LOG(RS_LOG_SEVERITY_FATAL, __VA_ARGS__)
 
     /////////////////////////////
     // Enumerated type support //
     /////////////////////////////
 
-    #define RS_ENUM_HELPERS(TYPE, PREFIX) const char * get_string(TYPE value); \
+#define RS_ENUM_HELPERS(TYPE, PREFIX) const char * get_string(TYPE value); \
         inline bool is_valid(TYPE value) { return value >= 0 && value < RS_##PREFIX##_COUNT; } \
         inline std::ostream & operator << (std::ostream & out, TYPE value) { if(is_valid(value)) return out << get_string(value); else return out << (int)value; }
     RS_ENUM_HELPERS(rs_stream, STREAM)
@@ -77,6 +82,10 @@ namespace rsimpl
     RS_ENUM_HELPERS(rs_preset, PRESET)
     RS_ENUM_HELPERS(rs_distortion, DISTORTION)
     RS_ENUM_HELPERS(rs_option, OPTION)
+    RS_ENUM_HELPERS(rs_capabilities, CAPABILITIES)
+    RS_ENUM_HELPERS(rs_source, SOURCE)
+    RS_ENUM_HELPERS(rs_output_buffer_format, OUTPUT_BUFFER_FORMAT)
+    RS_ENUM_HELPERS(rs_event_source, EVENT_SOURCE)
     #undef RS_ENUM_HELPERS
 
     ////////////////////////////////////////////
@@ -105,11 +114,12 @@ namespace rsimpl
 
     struct pixel_format_unpacker
     {
-        void (* unpack)(byte * const dest[], const byte * source, int count);
+        bool requires_processing;
+        void(*unpack)(byte * const dest[], const byte * source, int count);
         std::vector<std::pair<rs_stream, rs_format>> outputs;
 
-        bool provides_stream(rs_stream stream) const { for(auto & o : outputs) if(o.first == stream) return true; return false; }
-        rs_format get_format(rs_stream stream) const { for(auto & o : outputs) if(o.first == stream) return o.second; throw std::logic_error("missing output"); }
+        bool provides_stream(rs_stream stream) const { for (auto & o : outputs) if (o.first == stream) return true; return false; }
+        rs_format get_format(rs_stream stream) const { for (auto & o : outputs) if (o.first == stream) return o.second; throw std::logic_error("missing output"); }
     };
 
     struct native_pixel_format
@@ -120,6 +130,7 @@ namespace rsimpl
         std::vector<pixel_format_unpacker> unpackers;
 
         size_t get_image_size(int width, int height) const { return width * height * plane_count * bytes_per_pixel; }
+
     };
 
     ////////////////////////
@@ -143,25 +154,32 @@ namespace rsimpl
         int width, height;
         rs_format format;
         int fps;
-    }; 
+        rs_output_buffer_format output_format;
+    };
 
     struct interstream_rule // Requires a.*field + delta == b.*field OR a.*field + delta2 == b.*field
     {
-        rs_stream a, b;        
+        rs_stream a, b;
         int stream_request::* field;
         int delta, delta2;
     };
 
     struct supported_option
-    { 
+    {
         rs_option option;
-        double min, max, step; 
+        double min, max, step, def;
+    };
+
+    struct data_polling_request
+    {
+        bool        enabled = false;
     };
 
     struct static_device_info
     {
-        std::string name;                                                   // Model name of the camera
+        std::string name;                                                   // Model name of the camera        
         int stream_subdevices[RS_STREAM_NATIVE_COUNT];                      // Which subdevice is used to support each stream, or -1 if stream is unavailable
+        int data_subdevices[RS_STREAM_NATIVE_COUNT];                        // Specify whether the subdevice supports events pipe in addition to streaming, -1 if data channels are unavailable
         std::vector<subdevice_mode> subdevice_modes;                        // A list of available modes each subdevice can be put into
         std::vector<interstream_rule> interstream_rules;                    // Rules which constrain the set of available modes
         stream_request presets[RS_STREAM_NATIVE_COUNT][RS_PRESET_COUNT];    // Presets available for each stream
@@ -171,8 +189,20 @@ namespace rsimpl
         std::string firmware_version;                                       // Firmware version string
         std::string serial;                                                 // Serial number of the camera (from USB or from SPI memory)
         float nominal_depth_scale;                                          // Default scale
+        std::vector<rs_capabilities> capabilities_vector;
 
         static_device_info();
+    };
+
+    struct motion_event
+    {
+        unsigned short      error_state;
+        unsigned short      status;
+        unsigned short      imu_entries_num;
+        unsigned short      non_imu_entries_num;
+        unsigned long       timestamp;
+        rs_motion_data      imu_packets[4];
+        rs_timestamp_data   non_imu_packets[8];
     };
 
     //////////////////////////////////
@@ -184,34 +214,128 @@ namespace rsimpl
         subdevice_mode mode;                    // The streaming mode in which to place the hardware
         int pad_crop;                           // The number of pixels of padding (positive values) or cropping (negative values) to apply to all four edges of the image
         int unpacker_index;                     // The specific unpacker used to unpack the encoded format into the desired output formats
+        rs_output_buffer_format output_format = RS_OUTPUT_BUFFER_FORMAT_CONTINOUS; // The output buffer format. 
 
-        subdevice_mode_selection() : mode({}), pad_crop(), unpacker_index() {}
-        subdevice_mode_selection(const subdevice_mode & mode, int pad_crop, int unpacker_index) : mode(mode), pad_crop(pad_crop), unpacker_index(unpacker_index) {}
+        subdevice_mode_selection() : mode({}), pad_crop(), unpacker_index(), output_format(RS_OUTPUT_BUFFER_FORMAT_CONTINOUS){}
+        subdevice_mode_selection(const subdevice_mode & mode, int pad_crop, int unpacker_index) : mode(mode), pad_crop(pad_crop), unpacker_index(unpacker_index){}
 
         const pixel_format_unpacker & get_unpacker() const { return mode.pf.unpackers[unpacker_index]; }
         const std::vector<std::pair<rs_stream, rs_format>> & get_outputs() const { return get_unpacker().outputs; }
         int get_width() const { return mode.native_intrinsics.width + pad_crop * 2; }
         int get_height() const { return mode.native_intrinsics.height + pad_crop * 2; }
+        int get_framerate() const { return mode.fps; }
+        int get_stride() const { return requires_processing() ? get_width() : mode.native_dims.x; }
         size_t get_image_size(rs_stream stream) const;
         bool provides_stream(rs_stream stream) const { return get_unpacker().provides_stream(stream); }
         rs_format get_format(rs_stream stream) const { return get_unpacker().get_format(stream); }
         int get_framerate(rs_stream stream) const { return mode.fps; }
+        void set_output_buffer_format(const rs_output_buffer_format in_output_format);
+
         void unpack(byte * const dest[], const byte * source) const;
+        int get_unpacked_width() const;
+        int get_unpacked_height() const;
+
+		bool requires_processing() const { return (output_format == RS_OUTPUT_BUFFER_FORMAT_CONTINOUS) || (mode.pf.unpackers[unpacker_index].requires_processing); }
+    };
+
+    class frame_callback : public rs_frame_callback
+    {
+        void(*fptr)(rs_device * dev, rs_frame_ref * frame, void * user);
+        void * user;
+        rs_device * device;
+    public:
+        frame_callback() : frame_callback(nullptr, nullptr, nullptr) {}
+        frame_callback(rs_device * dev, void(*on_frame)(rs_device *, rs_frame_ref *, void *), void * user) : fptr(on_frame), user(user), device(dev) {}
+
+        operator bool() { return fptr != nullptr; }
+        void on_frame (rs_device * device, rs_frame_ref * frame) override { 
+            if (fptr)
+            {
+                try { fptr(device, frame, user); } catch (...) {}
+            }
+        }
+        void release() override { delete this; }
+    };
+
+    class motion_events_callback : public rs_motion_callback
+    {
+        void(*fptr)(rs_device * dev, rs_motion_data data, void * user);
+        void        * user;
+        rs_device   * device;
+    public:
+        motion_events_callback() : motion_events_callback(nullptr, nullptr, nullptr) {}
+        motion_events_callback(rs_device * dev, void(*fptr)(rs_device *, rs_motion_data, void *), void * user) : fptr(fptr), user(user), device(dev) {}
+
+        operator bool() { return fptr != nullptr; }
+
+        void on_event(rs_motion_data data) override
+        {
+            if (fptr)
+            {
+                try { fptr(device, data, user); } catch (...) {}
+            }
+        }
+
+        void release() override { }
+    };
+
+    class timestamp_events_callback : public rs_timestamp_callback
+    {
+        void(*fptr)(rs_device * dev, rs_timestamp_data data, void * user);
+        void        * user;
+        rs_device   * device;
+    public:
+        timestamp_events_callback() : timestamp_events_callback(nullptr, nullptr, nullptr) {}
+        timestamp_events_callback(rs_device * dev, void(*fptr)(rs_device *, rs_timestamp_data, void *), void * user) : fptr(fptr), user(user), device(dev) {}
+
+        operator bool() { return fptr != nullptr; }
+        void on_event(rs_timestamp_data data) override {
+            if (fptr)
+            {
+                try { fptr(device, data, user); } catch (...) {}
+            }
+        }
+        void release() override { }
+    };
+
+    typedef std::unique_ptr<rs_motion_callback, void(*)(rs_motion_callback*)> motion_callback_ptr;
+    typedef std::unique_ptr<rs_timestamp_callback, void(*)(rs_timestamp_callback*)> timestamp_callback_ptr;
+    class frame_callback_ptr
+    {
+        rs_frame_callback * callback;
+    public:
+        frame_callback_ptr() : callback(nullptr) {}
+        explicit frame_callback_ptr(rs_frame_callback * callback) : callback(callback) {}
+        frame_callback_ptr(const frame_callback_ptr&) = delete;
+        frame_callback_ptr& operator =(frame_callback_ptr&& other)
+        {
+            if (callback) callback->release();
+            callback = other.callback;
+            other.callback = nullptr;
+            return *this;
+        }
+        ~frame_callback_ptr() { if (callback) callback->release(); }
+        operator rs_frame_callback *() { return callback; }
+        rs_frame_callback * operator*() { return callback; }
     };
 
     struct device_config
     {
-        const static_device_info info;
-        stream_request requests[RS_STREAM_NATIVE_COUNT];    // Modified by enable/disable_stream calls
-        float depth_scale;                                  // Scale of depth values
+        const static_device_info            info;
+        stream_request                      requests[RS_STREAM_NATIVE_COUNT];                       // Modified by enable/disable_stream calls
+        frame_callback_ptr                  callbacks[RS_STREAM_NATIVE_COUNT];                      // Modified by set_frame_callback calls
+        data_polling_request                data_requests;                                          // Modified by enable/disable_events calls
+        motion_callback_ptr                 motion_callback{ nullptr, [](rs_motion_callback*){} };  // Modified by set_events_callback calls
+        timestamp_callback_ptr              timestamp_callback{ nullptr, [](rs_timestamp_callback*){} };
+        float depth_scale;                                              // Scale of depth values
 
-        device_config(const rsimpl::static_device_info & info) : info(info), depth_scale(info.nominal_depth_scale) 
-        { 
-            for(auto & req : requests) req = rsimpl::stream_request(); 
+        explicit device_config(const rsimpl::static_device_info & info) : info(info), depth_scale(info.nominal_depth_scale)
+        {
+            for (auto & req : requests) req = rsimpl::stream_request();
         }
 
-        subdevice_mode_selection select_mode(const stream_request (&requests)[RS_STREAM_NATIVE_COUNT], int subdevice_index) const;
-        std::vector<subdevice_mode_selection> select_modes(const stream_request (&requests)[RS_STREAM_NATIVE_COUNT]) const;
+        subdevice_mode_selection select_mode(const stream_request(&requests)[RS_STREAM_NATIVE_COUNT], int subdevice_index) const;
+        std::vector<subdevice_mode_selection> select_modes(const stream_request(&requests)[RS_STREAM_NATIVE_COUNT]) const;
         std::vector<subdevice_mode_selection> select_modes() const { return select_modes(requests); }
     };
 
@@ -221,13 +345,13 @@ namespace rsimpl
 
     inline rs_intrinsics pad_crop_intrinsics(const rs_intrinsics & i, int pad_crop)
     {
-        return {i.width+pad_crop*2, i.height+pad_crop*2, i.ppx+pad_crop, i.ppy+pad_crop, i.fx, i.fy, i.model, {i.coeffs[0], i.coeffs[1], i.coeffs[2], i.coeffs[3], i.coeffs[4]}};
+        return{ i.width + pad_crop * 2, i.height + pad_crop * 2, i.ppx + pad_crop, i.ppy + pad_crop, i.fx, i.fy, i.model, {i.coeffs[0], i.coeffs[1], i.coeffs[2], i.coeffs[3], i.coeffs[4]} };
     }
 
     inline rs_intrinsics scale_intrinsics(const rs_intrinsics & i, int width, int height)
     {
-        const float sx = (float)width/i.width, sy = (float)height/i.height;
-        return {width, height, i.ppx*sx, i.ppy*sy, i.fx*sx, i.fy*sy, i.model, {i.coeffs[0], i.coeffs[1], i.coeffs[2], i.coeffs[3], i.coeffs[4]}};
+        const float sx = (float)width / i.width, sy = (float)height / i.height;
+        return{ width, height, i.ppx*sx, i.ppy*sy, i.fx*sx, i.fy*sy, i.model, {i.coeffs[0], i.coeffs[1], i.coeffs[2], i.coeffs[3], i.coeffs[4]} };
     }
 
     inline bool operator == (const rs_intrinsics & a, const rs_intrinsics & b) { return std::memcmp(&a, &b, sizeof(a)) == 0; }
@@ -236,6 +360,141 @@ namespace rsimpl
     {
         return (c0 << 24) | (c1 << 16) | (c2 << 8) | c3;
     }
+
+    template<class T, int C>
+    class small_heap
+    {
+        T buffer[C];
+        bool is_free[C];
+        std::mutex mutex;
+        bool keep_allocating = true;
+        std::condition_variable cv;
+        int size = 0;
+
+    public:
+        small_heap()
+        {
+            for (auto i = 0; i < C; i++)
+            {
+                is_free[i] = true;
+                buffer[i] = std::move(T());
+            }
+        }
+
+        T * allocate()
+        {
+            std::unique_lock<std::mutex> lock(mutex);
+            if (!keep_allocating) return nullptr;
+
+            for (auto i = 0; i < C; i++)
+            {
+                if (is_free[i])
+                {
+                    is_free[i] = false;
+                    size++;
+                    return &buffer[i];
+                }
+            }
+            return nullptr;
+        }
+
+        void deallocate(T * item)
+        {
+             if (item < buffer || item >= buffer + C)
+            {
+                throw std::runtime_error("Trying to return item to a heap that didn't allocate it!");
+            }
+            auto i = item - buffer;
+            buffer[i] = std::move(T());
+
+
+          
+
+            
+            {
+                std::unique_lock<std::mutex> lock(mutex);
+
+                is_free[i] = true;
+                size--;
+
+                if (size == 0)
+                {
+                    lock.unlock();
+                    cv.notify_one();
+                }
+            }
+        }
+
+        void stop_allocation()
+        {
+            std::unique_lock<std::mutex> lock(mutex);
+            keep_allocating = false;
+        }
+
+        void wait_until_empty()
+        {
+            std::unique_lock<std::mutex> lock(mutex);
+
+            const auto ready = [this]()
+            {
+                return size == 0;
+            };
+            if (!ready() && !cv.wait_for(lock, std::chrono::hours(1000), ready)) // for some reason passing std::chrono::duration::max makes it return instantly
+            {
+                throw std::runtime_error("Could not flush one of the user controlled objects!");
+            }
+        }
+    };
+
+    class frame_continuation
+    {
+        std::function<void()> continuation;
+        const void* protected_data = nullptr;
+
+        frame_continuation(const frame_continuation &) = delete;
+        frame_continuation & operator=(const frame_continuation &) = delete;
+    public:
+        frame_continuation() : continuation([]() {}) {}
+
+        explicit frame_continuation(std::function<void()> continuation, const void* protected_data) : continuation(continuation), protected_data(protected_data) {}
+        
+
+        frame_continuation(frame_continuation && other) : continuation(std::move(other.continuation)), protected_data(other.protected_data)
+        {
+            other.continuation = []() {};
+            other.protected_data = nullptr;
+        }
+
+        void operator()()
+        {
+            continuation();
+            continuation = []() {};
+            protected_data = nullptr;
+        }
+
+        void reset()
+        {
+            protected_data = nullptr;
+            continuation = [](){};
+        }
+
+        const void* get_data() const { return protected_data; }
+
+        frame_continuation & operator=(frame_continuation && other)
+        {
+            continuation();
+            protected_data = other.protected_data;
+            continuation = other.continuation;
+            other.continuation = []() {};
+            other.protected_data = nullptr;
+            return *this;
+        }
+
+        ~frame_continuation()
+        {
+            continuation();
+        }
+    };
 }
 
 #endif

@@ -15,3 +15,4 @@ QMAKE_CXXFLAGS += -DRS_USE_V4L2_BACKEND
 
 HEADERS += ../include/librealsense/* ../src/*.h
 SOURCES += ../src/*.cpp ../src/verify.c
+

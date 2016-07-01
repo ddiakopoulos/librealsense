@@ -5,7 +5,16 @@
 #include <thread>
 #include <iostream>
 #include <algorithm>
+#include <iomanip>
+#include <mutex>
+#include "concurrency.hpp"
+#include <atomic>
+#include <map>
+
 #pragma comment(lib, "opengl32.lib")
+
+template<typename T> inline T MIN(T x, T y) { return x < y? x : y; }
+template<typename T> inline T MAX(T x, T y) { return x > y? x : y; }
 
 struct int2 { int x,y; };
 struct rect 
@@ -94,6 +103,43 @@ struct gui
         return changed;
     }
 
+    void indicator(const rect & r, double min, double max, double value)
+    {
+        value = MAX(min, MIN(max, value));
+        const int w = r.x1 - r.x0, h = r.y0 - r.y1;
+        double p = (w) * (value - min) / (max - min);
+        int Xdelta = 1;
+        int Ydelta = -1;
+        if (value == max)
+        {
+            int Xdelta =  0;
+            int Ydelta = -2;
+        }
+        else if (value == min)
+        {
+            int Xdelta = 2;
+            int Ydelta = 0;
+        }
+
+        const rect dragger = {int(r.x0+p+Xdelta), int(r.y0), int(r.x0+p+Ydelta), int(r.y1)};
+        fill_rect(r, {0.5,0.5,0.5});
+        fill_rect(dragger, {1,1,1});
+        glColor3f(1,1,1);
+
+        std::ostringstream oss;
+        oss << std::setprecision(2) << std::fixed << min;
+        auto delta = (min<0)?40:22;
+        draw_text(r.x0 - delta, r.y1 + abs(h/2) + 3, oss.str().c_str());
+
+        oss.str("");
+        oss << std::setprecision(2) << std::fixed << max;
+        draw_text(r.x1 + 6, r.y1 + abs(h/2) + 3, oss.str().c_str());
+
+        oss.str("");
+        oss << std::setprecision(2) << std::fixed << value;
+        draw_text(dragger.x0 - 1, dragger.y0 + 12, oss.str().c_str());
+    }
+
     void vscroll(const rect & r, int client_height, int & offset)
     {
         if(r.contains(cursor)) offset -= scroll_vec.y * 20;
@@ -109,7 +155,23 @@ struct gui
     }
 };
 
-texture_buffer buffers[4];
+
+std::mutex mm_mutex;
+rs::motion_data m_gyro_data;
+rs::motion_data m_acc_data;
+
+void on_motion_event(rs::motion_data entry)
+{
+    std::lock_guard<std::mutex> lock(mm_mutex);
+    if (entry.timestamp_data.source_id == RS_EVENT_IMU_ACCEL)
+        m_acc_data = entry;
+    if (entry.timestamp_data.source_id == RS_EVENT_IMU_GYRO)
+        m_gyro_data = entry;
+}
+
+void on_timestamp_event(rs::timestamp_data entry)
+{
+}
 
 int main(int argc, char * argv[]) try
 {
@@ -118,6 +180,7 @@ int main(int argc, char * argv[]) try
 
     glfwInit();
     auto win = glfwCreateWindow(1550, 960, "CPP Configuration Example", nullptr, nullptr);
+
     glfwMakeContextCurrent(win);
     gui g;
     glfwSetWindowUserPointer(win, &g);
@@ -137,33 +200,88 @@ int main(int argc, char * argv[]) try
     rs::context ctx;
     if(ctx.get_device_count() < 1) throw std::runtime_error("No device found. Is it plugged in?");
 
+    struct resolution
+    {
+        int width;
+        int height;
+        rs::format format;
+    };
+    std::map<rs::stream, resolution> resolutions;
+
     rs::device * dev = ctx.get_device(0);
-    dev->enable_stream(rs::stream::depth, rs::preset::best_quality);
-    dev->enable_stream(rs::stream::color, rs::preset::best_quality);
-    dev->enable_stream(rs::stream::infrared, rs::preset::best_quality);
-    try { dev->enable_stream(rs::stream::infrared2, rs::preset::best_quality); } catch(...) {}
+    const auto streams = 6;
+    single_consumer_queue<rs::frame> frames_queue[streams];
+    texture_buffer buffers[streams];
+    std::atomic<bool> running(true);
+    static const auto max_queue_size = 2;
+    for (auto i = 0; i < 5; i++)
+    {
+        dev->set_frame_callback((rs::stream)i, [dev, &buffers, &running, &frames_queue, &resolutions, i](rs::frame frame)
+        {
+            if (running && frames_queue[i].size() < max_queue_size)
+            {
+                frames_queue[i].enqueue(std::move(frame));
+            }
+        });
+    }
+
+    dev->enable_stream(rs::stream::depth, 0, 0, rs::format::z16, 60, rs::output_buffer_format::native);
+    dev->enable_stream(rs::stream::color, 640, 480, rs::format::rgb8, 60, rs::output_buffer_format::native);
+    dev->enable_stream(rs::stream::infrared, 0, 0, rs::format::y8, 60, rs::output_buffer_format::native);
+
+    resolutions[rs::stream::depth] = { dev->get_stream_width(rs::stream::depth), dev->get_stream_height(rs::stream::depth), rs::format::z16 };
+    resolutions[rs::stream::color] = { dev->get_stream_width(rs::stream::color), dev->get_stream_height(rs::stream::color), rs::format::rgb8 };
+    resolutions[rs::stream::infrared] = { dev->get_stream_width(rs::stream::infrared), dev->get_stream_height(rs::stream::infrared), rs::format::y8 };
+
+
+    bool supports_fish_eye = dev->supports(rs::capabilities::fish_eye);
+    bool supports_motion_events = dev->supports(rs::capabilities::motion_events);
+    bool has_motion_module = supports_fish_eye || supports_motion_events;
+    if(dev->supports(rs::capabilities::infrared2))
+    {
+        dev->enable_stream(rs::stream::infrared2, 0, 0, rs::format::y8, 60, rs::output_buffer_format::native);
+        resolutions[rs::stream::infrared2] = { dev->get_stream_width(rs::stream::infrared2), dev->get_stream_height(rs::stream::infrared2), rs::format::y8 };
+    }
+
+    if(supports_fish_eye)
+    {
+        dev->enable_stream(rs::stream::fisheye, 640, 480, rs::format::raw8, 60, rs::output_buffer_format::native);
+        resolutions[rs::stream::fisheye] = { dev->get_stream_width(rs::stream::fisheye), dev->get_stream_height(rs::stream::fisheye), rs::format::raw8 };
+    }
+
+    if (has_motion_module)
+    {
+        if (supports_motion_events)
+        {
+            dev->enable_motion_tracking(on_motion_event, on_timestamp_event);            
+        }
+
+        glfwSetWindowSize(win, 1100, 960);
+    }
 
     //std::this_thread::sleep_for(std::chrono::seconds(1));
-
-    struct option { rs::option opt; double min, max, step, value; };
+    struct option { rs::option opt; double min, max, step, value, def; };
     std::vector<option> options;
     for(int i=0; i<RS_OPTION_COUNT; ++i)
     {
         option o = {(rs::option)i};
         if(!dev->supports_option(o.opt)) continue;
-        dev->get_option_range(o.opt, o.min, o.max, o.step);
+        dev->get_option_range(o.opt, o.min, o.max, o.step, o.def);
         if(o.min == o.max) continue;
         try { o.value = dev->get_option(o.opt); } catch(...) {}
         options.push_back(o);
     }
-    double dc_preset = 0, iv_preset = 0;
 
+    rs::format format[streams] = {};
+    int frame_number[streams] = {};
+    int fps[streams] = {};
+    double dc_preset = 0, iv_preset = 0;
     int offset = 0, panel_height = 1;
     while(!glfwWindowShouldClose(win))
     {
         glfwPollEvents();
-        if(dev->is_streaming()) dev->wait_for_frames();
-        
+        rs::frame frame;
+
         int w, h;
         glfwGetFramebufferSize(win, &w, &h);
         glViewport(0, 0, w, h);
@@ -178,26 +296,50 @@ int main(int argc, char * argv[]) try
 
         if(dev->is_streaming())
         {
-            if(g.button({w-260, y, w-20, y+24}, "Stop Capture")) dev->stop();
+            if(g.button({w-260, y, w-20, y+24}, "Stop Capture"))
+            {
+                running = false;
+                for (auto i = 0; i < 5; i++) frames_queue[i].clear();
+                dev->stop();
+
+                if (has_motion_module)
+                    dev->stop(rs::source::motion_data);
+            }
         }
         else
         {
-            if(g.button({w-260, y, w-20, y+24}, "Start Capture")) dev->start();
+            if(g.button({w-260, y, w-20, y+24}, "Start Capture"))
+            {
+                running = true;
+                dev->start();
+
+                if (has_motion_module)
+                    dev->start(rs::source::motion_data);
+            }
         }
         y += 34;
         if(!dev->is_streaming())
         {
-            for(int i=0; i<4; ++i)
+            for (int i = 0; i <= RS_CAPABILITIES_FISH_EYE ; ++i)
             {
                 auto s = (rs::stream)i;
-                bool enable = dev->is_stream_enabled(s);
-                if(g.checkbox({w-260, y, w-240, y+20}, enable))
+                auto cap = (rs::capabilities)i;
+
+                if (dev->supports(cap))
                 {
+                    bool enable = dev->is_stream_enabled(s);
+
                     if(enable) dev->enable_stream(s, rs::preset::best_quality);
                     else dev->disable_stream(s);
+
+                    if(g.checkbox({w-260, y, w-240, y+20}, enable))
+                    {
+                        if(enable) dev->enable_stream(s, rs::preset::best_quality);
+                        else dev->disable_stream(s);
+                    }
+                    g.label({w-234, y+13}, {1,1,1}, "Enable %s", rs_stream_to_string((rs_stream)i));
+                    y += 30;
                 }
-                g.label({w-234, y+13}, {1,1,1}, "Enable %s", rs_stream_to_string((rs_stream)i));
-                y += 30;
             }
         }
 
@@ -212,28 +354,104 @@ int main(int argc, char * argv[]) try
             y += 38;
         }
         g.label({w-260,y+12}, {1,1,1}, "Depth control parameters preset: %g", dc_preset);
-        if(g.slider(100, {w-260,y+16,w-20,y+36}, 0, 5, 1, dc_preset)) apply_depth_control_preset(dev, static_cast<int>(dc_preset));
+        if(g.slider(100, {w-260,y+16,w-20,y+36}, 0, 5, 1, dc_preset)) rs_apply_depth_control_preset((rs_device *)dev, static_cast<int>(dc_preset));
         y += 38;
         g.label({w-260,y+12}, {1,1,1}, "IVCAM options preset: %g", iv_preset);
-        if(g.slider(101, {w-260,y+16,w-20,y+36}, 0, 8, 1, iv_preset)) apply_ivcam_preset(dev, static_cast<int>(iv_preset));
+        if(g.slider(101, {w-260,y+16,w-20,y+36}, 0, 10, 1, iv_preset)) rs_apply_ivcam_preset((rs_device *)dev, static_cast<rs_ivcam_preset>((int)iv_preset));
         y += 38;
-        
+
         panel_height = y + 10 + offset;
-        
+
         if(dev->is_streaming())
         {
-            w-=270;
-            buffers[0].show(*dev, rs::stream::color, 0, 0, w/2, h/2);
-            buffers[1].show(*dev, rs::stream::depth, w/2, 0, w-w/2, h/2);
-            buffers[2].show(*dev, rs::stream::infrared, 0, h/2, w/2, h-h/2);
-            buffers[3].show(*dev, rs::stream::infrared2, w/2, h/2, w-w/2, h-h/2);
+            w += (has_motion_module ? 150 : -280);
+
+            int scale_factor = (has_motion_module ? 3 : 2);
+            int fWidth = w/scale_factor;
+            int fHeight = h/scale_factor;
+
+            static struct position{int rx, ry, rw, rh;} pos_vec[5];
+            pos_vec[0] = position{fWidth, 0, fWidth, fHeight};
+            pos_vec[1] = position{0, 0, fWidth, fHeight};
+            pos_vec[2] = position{0, fHeight, fWidth, fHeight};
+            pos_vec[3] = position{fWidth, fHeight, fWidth, fHeight};
+            pos_vec[4] = position{0, 2*fHeight, fWidth, fHeight};
+
+            for (auto i = 0; i < 5; i++)
+            {
+                if(!dev->is_stream_enabled((rs::stream)i))
+                    continue;
+
+                if (frames_queue[i].try_dequeue(&frame))
+                {
+                    buffers[i].upload(frame);
+                    format[i] = frame.get_format();
+                    frame_number[i] = frame.get_frame_number();
+                    fps[i] = frame.get_framerate();
+                }
+
+                buffers[i].show((rs::stream)i, format[i], fps[i], frame_number[i], pos_vec[i].rx, pos_vec[i].ry, pos_vec[i].rw, pos_vec[i].rh, resolutions[(rs::stream)i].width, resolutions[(rs::stream)i].height);
+            }
+
+            if (has_motion_module)
+            {
+              std::lock_guard<std::mutex> lock(mm_mutex);
+
+              int x = w/3 + 10;
+              int y = 2*h/3 + 5;
+              //buffers[5].print(x, y, "MM (200 Hz)");
+
+              auto rect_y0_pos = y+36;
+              auto rect_y1_pos = y+28;
+              auto indicator_width = 42;
+
+              buffers[5].print(x, rect_y0_pos-10, "Gyro X: ");
+              g.indicator({x + 100, rect_y0_pos , x + 300, rect_y1_pos}, -10, 10, m_gyro_data.axes[0]);
+              rect_y0_pos+=indicator_width;
+              rect_y1_pos+=indicator_width;
+
+              buffers[5].print(x, rect_y0_pos-10, "Gyro Y: ");
+              g.indicator({x + 100, rect_y0_pos , x + 300, rect_y1_pos}, -10, 10, m_gyro_data.axes[1]);
+              rect_y0_pos+=indicator_width;
+              rect_y1_pos+=indicator_width;
+
+              buffers[5].print(x, rect_y0_pos-10, "Gyro Z: ");
+              g.indicator({x + 100, rect_y0_pos , x + 300, rect_y1_pos}, -10, 10, m_gyro_data.axes[2]);
+              rect_y0_pos+=indicator_width;
+              rect_y1_pos+=indicator_width;
+
+              buffers[5].print(x, rect_y0_pos-10, "Acc X: ");
+              g.indicator({x + 100, rect_y0_pos , x + 300, rect_y1_pos}, -10, 10, m_acc_data.axes[0]);
+              rect_y0_pos+=indicator_width;
+              rect_y1_pos+=indicator_width;
+
+              buffers[5].print(x, rect_y0_pos-10, "Acc Y: ");
+              g.indicator({x + 100, rect_y0_pos , x + 300, rect_y1_pos}, -10, 10, m_acc_data.axes[1]);
+              rect_y0_pos+=indicator_width;
+              rect_y1_pos+=indicator_width;
+
+              buffers[5].print(x, rect_y0_pos-10, "Acc Z: ");
+              g.indicator({x + 100, rect_y0_pos , x + 300, rect_y1_pos}, -10, 10, m_acc_data.axes[2]);
+          }
         }
 
         glfwSwapBuffers(win);
-
         g.scroll_vec = {0,0};
         g.click = false;
         if(!g.mouse_down) g.clicked_id = 0;
+    }
+
+    running = false;
+
+    for (auto i = 0; i < streams; i++) frames_queue[i].clear();
+
+    if(dev->is_streaming())
+        dev->stop();
+
+    for (auto i = 0; i < streams; i++)
+    {
+        if (dev->is_stream_enabled((rs::stream)i))
+            dev->disable_stream((rs::stream)i);
     }
 
     glfwTerminate();

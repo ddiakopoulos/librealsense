@@ -56,7 +56,26 @@ namespace rsimpl
         {{640, 240}, {30,60,120,240,300}}        
     };
     
-    static static_device_info get_f200_info(const f200::CameraCalibrationParameters & c)
+    void update_supported_options(uvc::device& dev,
+                                            const uvc::extension_unit depth_xu,
+                                            const std::vector <std::pair<rs_option, char>> options,
+                                            std::vector<supported_option>& supported_options)
+    {
+        for (auto p : options)
+        {
+            int min, max, step, def;
+            get_extension_control_range(dev, depth_xu, p.second, &min, &max, &step, &def);
+            supported_option so;
+            so.option = p.first;
+            so.min = min;
+            so.max = max;
+            so.step = step;
+            so.def = def;
+            supported_options.push_back(so);
+        }
+    }
+
+    static static_device_info get_f200_info(std::shared_ptr<uvc::device> device, const f200::CameraCalibrationParameters & c)
     {
         LOG_INFO("Connecting to Intel RealSense F200");
 
@@ -104,13 +123,7 @@ namespace rsimpl
         info.presets[RS_STREAM_DEPTH   ][RS_PRESET_HIGHEST_FRAMERATE] = {true, 640, 480, RS_FORMAT_Z16,  60};
         info.presets[RS_STREAM_COLOR   ][RS_PRESET_HIGHEST_FRAMERATE] = {true, 640, 480, RS_FORMAT_RGB8, 60};
 
-        info.options = {
-            {RS_OPTION_F200_LASER_POWER,          0.0, 16.0,  1.0},
-            {RS_OPTION_F200_ACCURACY,             1.0, 3.0,   1.0},
-            {RS_OPTION_F200_MOTION_RANGE,         0.0, 100.0, 1.0},
-            {RS_OPTION_F200_FILTER_OPTION,        0.0, 7.0,   1.0},
-            {RS_OPTION_F200_CONFIDENCE_THRESHOLD, 0.0, 15.0,  1.0}
-        };
+        update_supported_options(*device.get(), f200::depth_xu, eu_F200_depth_controls, info.options);
 
         rsimpl::pose depth_to_color = {transpose((const float3x3 &)c.Rt), (const float3 &)c.Tt * 0.001f}; // convert mm to m
         info.stream_poses[RS_STREAM_DEPTH] = info.stream_poses[RS_STREAM_INFRARED] = inverse(depth_to_color);
@@ -140,7 +153,7 @@ namespace rsimpl
         {{640, 480}, {30,60,120,200}}      
     };    
 
-    static static_device_info get_sr300_info(const f200::CameraCalibrationParameters & c)
+    static static_device_info get_sr300_info(std::shared_ptr<uvc::device> device, const f200::CameraCalibrationParameters & c)
     {
         LOG_INFO("Connecting to Intel RealSense SR300");
 
@@ -184,31 +197,26 @@ namespace rsimpl
         }
 
         info.options = {
-            {RS_OPTION_F200_LASER_POWER,                            0.0,        16.0,        1.0},
-            {RS_OPTION_F200_ACCURACY,                               1.0,        3.0,         1.0},
-            {RS_OPTION_F200_MOTION_RANGE,                           0.0,        100.0,       1.0},
-            {RS_OPTION_F200_FILTER_OPTION,                          0.0,        7.0,         1.0},
-            {RS_OPTION_F200_CONFIDENCE_THRESHOLD,                   0.0,        15.0,        1.0},
-
-            {RS_OPTION_SR300_DYNAMIC_FPS,                           0.0f,       0.0,         0.0}, //2.0,        60.0,        1.0},
-            {RS_OPTION_SR300_AUTO_RANGE_ENABLE_MOTION_VERSUS_RANGE, 0.0,        2.0,         1.0},
-            {RS_OPTION_SR300_AUTO_RANGE_ENABLE_LASER,               0.0,        1.0,         1.0},  
-            {RS_OPTION_SR300_AUTO_RANGE_MIN_MOTION_VERSUS_RANGE,    (double)SHRT_MIN, (double)SHRT_MAX,  1.0}, 
-            {RS_OPTION_SR300_AUTO_RANGE_MAX_MOTION_VERSUS_RANGE,    (double)SHRT_MIN, (double)SHRT_MAX,  1.0}, 
-            {RS_OPTION_SR300_AUTO_RANGE_START_MOTION_VERSUS_RANGE,  (double)SHRT_MIN, (double)SHRT_MAX,  1.0}, 
-            {RS_OPTION_SR300_AUTO_RANGE_MIN_LASER,                  (double)SHRT_MIN, (double)SHRT_MAX,  1.0}, 
-            {RS_OPTION_SR300_AUTO_RANGE_MAX_LASER,                  (double)SHRT_MIN, (double)SHRT_MAX,  1.0}, 
-            {RS_OPTION_SR300_AUTO_RANGE_START_LASER,                (double)SHRT_MIN, (double)SHRT_MAX,  1.0}, 
-            {RS_OPTION_SR300_AUTO_RANGE_UPPER_THRESHOLD,            0.0,        (double)USHRT_MAX,       1.0},
-            {RS_OPTION_SR300_AUTO_RANGE_LOWER_THRESHOLD,            0.0,        (double)USHRT_MAX,       1.0},
-            {RS_OPTION_SR300_WAKEUP_DEV_PHASE1_PERIOD,              0.0,        (double)USHRT_MAX,       1.0 },
-            {RS_OPTION_SR300_WAKEUP_DEV_PHASE1_FPS,                 0.0,        ((double)sr300::e_suspend_fps::eFPS_MAX) - 1,   1.0 },
-            {RS_OPTION_SR300_WAKEUP_DEV_PHASE2_PERIOD,              0.0,        (double)USHRT_MAX,                  1.0 },
-            {RS_OPTION_SR300_WAKEUP_DEV_PHASE2_FPS,                 0.0,        ((double)sr300::e_suspend_fps::eFPS_MAX) - 1,   1.0 },
-            {RS_OPTION_SR300_WAKEUP_DEV_RESET,                      0.0,        0.0,    1.0 },
-            {RS_OPTION_SR300_WAKE_ON_USB_REASON,                    0.0,        (double)sr300::wakeonusb_reason::eMaxWakeOnReason, 1.0 },
-            {RS_OPTION_SR300_WAKE_ON_USB_CONFIDENCE,                0.0,        100.,   1.0 }  // Percentage
+            {RS_OPTION_SR300_AUTO_RANGE_ENABLE_MOTION_VERSUS_RANGE, 0.0,              2.0,                                       1.0,   -1.0},
+            {RS_OPTION_SR300_AUTO_RANGE_ENABLE_LASER,               0.0,              1.0,                                       1.0,   -1.0},
+            {RS_OPTION_SR300_AUTO_RANGE_MIN_MOTION_VERSUS_RANGE,    (double)SHRT_MIN, (double)SHRT_MAX,                          1.0,   -1.0},
+            {RS_OPTION_SR300_AUTO_RANGE_MAX_MOTION_VERSUS_RANGE,    (double)SHRT_MIN, (double)SHRT_MAX,                          1.0,   -1.0},
+            {RS_OPTION_SR300_AUTO_RANGE_START_MOTION_VERSUS_RANGE,  (double)SHRT_MIN, (double)SHRT_MAX,                          1.0,   -1.0},
+            {RS_OPTION_SR300_AUTO_RANGE_MIN_LASER,                  (double)SHRT_MIN, (double)SHRT_MAX,                          1.0,   -1.0},
+            {RS_OPTION_SR300_AUTO_RANGE_MAX_LASER,                  (double)SHRT_MIN, (double)SHRT_MAX,                          1.0,   -1.0},
+            {RS_OPTION_SR300_AUTO_RANGE_START_LASER,                (double)SHRT_MIN, (double)SHRT_MAX,                          1.0,   -1.0},
+            {RS_OPTION_SR300_AUTO_RANGE_UPPER_THRESHOLD,            0.0,              (double)USHRT_MAX,                         1.0,   -1.0},
+            {RS_OPTION_SR300_AUTO_RANGE_LOWER_THRESHOLD,            0.0,              (double)USHRT_MAX,                         1.0,   -1.0},
+            {RS_OPTION_SR300_WAKEUP_DEV_PHASE1_PERIOD,              0.0,              (double)USHRT_MAX,                         1.0,   -1.0},
+            {RS_OPTION_SR300_WAKEUP_DEV_PHASE1_FPS,                 0.0,              ((double)sr300::e_suspend_fps::eFPS_MAX) - 1,      1.0, -1.0},
+            {RS_OPTION_SR300_WAKEUP_DEV_PHASE2_PERIOD,              0.0,              (double)USHRT_MAX, 1.0, -1.0},
+            {RS_OPTION_SR300_WAKEUP_DEV_PHASE2_FPS,                 0.0,              ((double)sr300::e_suspend_fps::eFPS_MAX) - 1,      1.0, -1.0},
+            {RS_OPTION_SR300_WAKEUP_DEV_RESET,                      0.0,              0.0,               1.0, -1.0},
+            {RS_OPTION_SR300_WAKE_ON_USB_REASON,                    0.0,              (double)sr300::wakeonusb_reason::eMaxWakeOnReason, 1.0, -1.0},
+            {RS_OPTION_SR300_WAKE_ON_USB_CONFIDENCE,                0.0,              100.,                                              1.0, -1.0}  // Percentage
         };
+
+        update_supported_options(*device.get(), f200::depth_xu, eu_SR300_depth_controls, info.options);
 
         rsimpl::pose depth_to_color = {transpose((const float3x3 &)c.Rt), (const float3 &)c.Tt * 0.001f}; // convert mm to m
         info.stream_poses[RS_STREAM_DEPTH] = info.stream_poses[RS_STREAM_INFRARED] = inverse(depth_to_color);
@@ -220,10 +228,10 @@ namespace rsimpl
     }
 
     f200_camera::f200_camera(std::shared_ptr<uvc::device> device, const static_device_info & info, const f200::CameraCalibrationParameters & calib, const f200::IVCAMTemperatureData & temp, const f200::IVCAMThermalLoopParams & params) :
-        rs_device(device, info), base_calibration(calib), base_temperature_data(temp), thermal_loop_params(params), last_temperature_delta(std::numeric_limits<float>::infinity())
+        rs_device_base(device, info), base_calibration(calib), base_temperature_data(temp), thermal_loop_params(params), last_temperature_delta(std::numeric_limits<float>::infinity())
     {
         // If thermal control loop requested, start up thread to handle it
-		if(thermal_loop_params.IRThermalLoopEnable)
+        if(thermal_loop_params.IRThermalLoopEnable)
         {
             runTemperatureThread = true;
             temperatureThread = std::thread(&f200_camera::temperature_control_loop, this);
@@ -242,8 +250,6 @@ namespace rsimpl
         arr.ARLowerTh = 650;
     }
 
-    //const uvc::guid IVCAM_COLOR_XU = {0xB8EC416E,0xA3AC,0x4580,{0x8D,0x5C,0x0B,0xEE,0x15,0x97,0xE4,0x3D}};
-
     std::shared_ptr<rs_device> make_f200_device(std::shared_ptr<uvc::device> device)
     {
         std::timed_mutex mutex;
@@ -251,9 +257,13 @@ namespace rsimpl
         auto calib = f200::read_f200_calibration(*device, mutex);
         f200::enable_timestamp(*device, mutex, true, true);
 
-        auto info = get_f200_info(std::get<0>(calib));
+        auto info = get_f200_info(device, std::get<0>(calib));
         f200::get_module_serial_string(*device, mutex, info.serial, 96);
         f200::get_firmware_version_string(*device, mutex, info.firmware_version);
+
+        info.capabilities_vector.push_back(RS_CAPABILITIES_COLOR);
+        info.capabilities_vector.push_back(RS_CAPABILITIES_DEPTH);
+        info.capabilities_vector.push_back(RS_CAPABILITIES_INFRARED);
 
         return std::make_shared<f200_camera>(device, info, std::get<0>(calib), std::get<1>(calib), std::get<2>(calib));
     }
@@ -276,10 +286,14 @@ namespace rsimpl
         //uvc::set_pu_control_with_retry(*device, 0, rs_option::RS_OPTION_COLOR_WHITE_BALANCE, 4600); // auto
         //uvc::set_pu_control_with_retry(*device, 0, rs_option::RS_OPTION_COLOR_EXPOSURE, -6); // auto
 
-        auto info = get_sr300_info(std::get<0>(calib));
+        auto info = get_sr300_info(device, std::get<0>(calib));
 
         f200::get_module_serial_string(*device, mutex, info.serial, 132);
         f200::get_firmware_version_string(*device, mutex, info.firmware_version);
+
+        info.capabilities_vector.push_back(RS_CAPABILITIES_COLOR);
+        info.capabilities_vector.push_back(RS_CAPABILITIES_DEPTH);
+        info.capabilities_vector.push_back(RS_CAPABILITIES_INFRARED);
 
         return std::make_shared<f200_camera>(device, info, std::get<0>(calib), std::get<1>(calib), std::get<2>(calib));
     }
@@ -408,7 +422,7 @@ namespace rsimpl
             case RS_OPTION_F200_MOTION_RANGE:         f200::set_motion_range(get_device(), static_cast<uint8_t>(values[i])); break;
             case RS_OPTION_F200_FILTER_OPTION:        f200::set_filter_option(get_device(), static_cast<uint8_t>(values[i])); break;
             case RS_OPTION_F200_CONFIDENCE_THRESHOLD: f200::set_confidence_threshold(get_device(), static_cast<uint8_t>(values[i])); break;
-            case RS_OPTION_SR300_DYNAMIC_FPS:         f200::set_dynamic_fps(get_device(), static_cast<uint8_t>(values[i])); break; // IVCAM 1.5 Only
+            case RS_OPTION_F200_DYNAMIC_FPS:          f200::set_dynamic_fps(get_device(), static_cast<uint8_t>(values[i])); break; // IVCAM 1.0 Only
 
             case RS_OPTION_SR300_WAKEUP_DEV_RESET:    sr300::reset_wakeup_device(get_device(), usbMutex); break;
 
@@ -422,7 +436,7 @@ namespace rsimpl
             case RS_OPTION_SR300_AUTO_RANGE_START_LASER:                arr_writer.set(&f200::IVCAMAutoRangeRequest::startLaser, values[i]); break;
             case RS_OPTION_SR300_AUTO_RANGE_UPPER_THRESHOLD:            arr_writer.set(&f200::IVCAMAutoRangeRequest::ARUpperTh, values[i]); break;
             case RS_OPTION_SR300_AUTO_RANGE_LOWER_THRESHOLD:            arr_writer.set(&f200::IVCAMAutoRangeRequest::ARLowerTh, values[i]); break;
-    
+
             case RS_OPTION_SR300_WAKEUP_DEV_PHASE1_PERIOD:              arr_wakeup_dev_writer.set(&sr300::wakeup_dev_params::phase1Period, values[i]); break;
             case RS_OPTION_SR300_WAKEUP_DEV_PHASE1_FPS:                 arr_wakeup_dev_writer.set(&sr300::wakeup_dev_params::phase1FPS, (int)values[i]); break;
             case RS_OPTION_SR300_WAKEUP_DEV_PHASE2_PERIOD:              arr_wakeup_dev_writer.set(&sr300::wakeup_dev_params::phase2Period, values[i]); break;
@@ -458,7 +472,7 @@ namespace rsimpl
             case RS_OPTION_F200_MOTION_RANGE:         f200::get_motion_range        (get_device(), val); values[i] = val; break;
             case RS_OPTION_F200_FILTER_OPTION:        f200::get_filter_option       (get_device(), val); values[i] = val; break;
             case RS_OPTION_F200_CONFIDENCE_THRESHOLD: f200::get_confidence_threshold(get_device(), val); values[i] = val; break;
-            case RS_OPTION_SR300_DYNAMIC_FPS:         f200::get_dynamic_fps         (get_device(), val); values[i] = val; break; // IVCAM 1.5 Only
+            case RS_OPTION_F200_DYNAMIC_FPS:          f200::get_dynamic_fps         (get_device(), val); values[i] = val; break;            
 
             case RS_OPTION_SR300_AUTO_RANGE_ENABLE_MOTION_VERSUS_RANGE: values[i] = arr_reader.get(&f200::IVCAMAutoRangeRequest::enableMvR); break; 
             case RS_OPTION_SR300_AUTO_RANGE_ENABLE_LASER:               values[i] = arr_reader.get(&f200::IVCAMAutoRangeRequest::enableLaser); break;
@@ -472,7 +486,7 @@ namespace rsimpl
             case RS_OPTION_SR300_AUTO_RANGE_LOWER_THRESHOLD:            values[i] = arr_reader.get(&f200::IVCAMAutoRangeRequest::ARLowerTh); break;
 
             case RS_OPTION_SR300_WAKE_ON_USB_REASON:        sr300::get_wakeup_reason(get_device(), usbMutex, val); values[i] = val; break;
-            case RS_OPTION_SR300_WAKE_ON_USB_CONFIDENCE:    sr300::get_wakeup_confidence(get_device(), usbMutex, val); values[i] = val; break;
+            case RS_OPTION_SR300_WAKE_ON_USB_CONFIDENCE:    sr300::get_wakeup_confidence(get_device(), usbMutex, val); values[i] = val; break;            
 
             default: LOG_WARNING("Cannot get " << options[i] << " on " << get_name()); break;
             }
@@ -520,6 +534,10 @@ namespace rsimpl
             total += delta;
             const int timestamp = static_cast<int>(total / 100000);
             return timestamp;
+        }
+        int get_frame_counter(const subdevice_mode & mode, const void * frame) override
+        {
+            return 0;
         }
     };
 

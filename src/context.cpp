@@ -5,8 +5,9 @@
 #include "uvc.h"
 #include "r200.h"
 #include "f200.h"
+#include <mutex>
 
-rs_context::rs_context() : rs_context(0)
+rs_context_base::rs_context_base()
 {
     context = rsimpl::uvc::create_context();
 
@@ -14,30 +15,55 @@ rs_context::rs_context() : rs_context(0)
     {
         LOG_INFO("UVC device detected with VID = 0x" << std::hex << get_vendor_id(*device) << " PID = 0x" << get_product_id(*device));
 
-		if (get_vendor_id(*device) != 32902)
-			continue;
-				
+        if (get_vendor_id(*device) != PID_INTEL_CAMERA)
+            continue;
+
         switch(get_product_id(*device))
         {
-        case 2688: devices.push_back(rsimpl::make_r200_device(device)); break;
-        case 2662: devices.push_back(rsimpl::make_f200_device(device)); break;
-        case 2725: devices.push_back(rsimpl::make_sr300_device(device)); break;
+            case R200_PRODUCT_ID: devices.push_back(rsimpl::make_r200_device(device)); break;
+            case LR200_PRODUCT_ID: devices.push_back(rsimpl::make_lr200_device(device)); break;
+            case ZR300_PRODUCT_ID: devices.push_back(rsimpl::make_zr300_device(device)); break;
+            case F200_PRODUCT_ID: devices.push_back(rsimpl::make_f200_device(device)); break;
+            case SR300_PRODUCT_ID: devices.push_back(rsimpl::make_sr300_device(device)); break;
         }
     }
 }
 
 // Enforce singleton semantics on rs_context
+rs_context* rs_context_base::instance = nullptr;
+int rs_context_base::ref_count = 0;
+std::mutex rs_context_base::instance_lock;
 
-bool rs_context::singleton_alive = false;
-
-rs_context::rs_context(int)
+rs_context* rs_context_base::acquire_instance()
 {
-    if(singleton_alive) throw std::runtime_error("rs_context has singleton semantics, only one may exist at a time");
-    singleton_alive = true;
+    std::lock_guard<std::mutex> lock(instance_lock);
+    if (ref_count++ == 0)
+    {
+        instance = new rs_context_base();
+    }
+    return instance;
 }
 
-rs_context::~rs_context()
+void rs_context_base::release_instance()
 {
-    assert(singleton_alive);
-    singleton_alive = false;
+    std::lock_guard<std::mutex> lock(instance_lock);
+    if (--ref_count == 0)
+    {
+        delete instance;
+    }
+}
+
+rs_context_base::~rs_context_base()
+{
+    assert(ref_count == 0);
+}
+
+int rs_context_base::get_device_count() const
+{
+    return devices.size();
+}
+
+rs_device* rs_context_base::get_device(int index) const
+{
+    return devices[index].get();
 }

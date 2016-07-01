@@ -12,11 +12,28 @@
 #include <thread>
 #include <condition_variable>
 
+#define F200_PRODUCT_ID  0x0a66
+#define SR300_PRODUCT_ID 0x0aa5
+
+
+const std::vector <std::pair<rs_option, char>> eu_F200_depth_controls = {{rs_option::RS_OPTION_F200_LASER_POWER,          0x01},
+                                                                         {rs_option::RS_OPTION_F200_ACCURACY,             0x02},
+                                                                         {rs_option::RS_OPTION_F200_MOTION_RANGE,         0x03},
+                                                                         {rs_option::RS_OPTION_F200_FILTER_OPTION,        0x05},
+                                                                         {rs_option::RS_OPTION_F200_CONFIDENCE_THRESHOLD, 0x06},
+                                                                         {rs_option::RS_OPTION_F200_DYNAMIC_FPS,          0x07}};
+
+const std::vector <std::pair<rs_option, char>> eu_SR300_depth_controls = {{rs_option::RS_OPTION_F200_LASER_POWER,          0x01},
+                                                                          {rs_option::RS_OPTION_F200_ACCURACY,             0x02},
+                                                                          {rs_option::RS_OPTION_F200_MOTION_RANGE,         0x03},
+                                                                          {rs_option::RS_OPTION_F200_FILTER_OPTION,        0x05},
+                                                                          {rs_option::RS_OPTION_F200_CONFIDENCE_THRESHOLD, 0x06}};
+
 namespace rsimpl
 {
     namespace f200 { class IVCAMHardwareIO; }
 
-    class f200_camera final : public rs_device
+    class f200_camera final : public rs_device_base
     {
         std::timed_mutex usbMutex;
 

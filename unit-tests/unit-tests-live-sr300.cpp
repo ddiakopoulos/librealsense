@@ -67,8 +67,7 @@ TEST_CASE( "SR300 devices support all required options", "[live] [sr300]" )
                 RS_OPTION_F200_ACCURACY,
                 RS_OPTION_F200_MOTION_RANGE,
                 RS_OPTION_F200_FILTER_OPTION,
-                RS_OPTION_F200_CONFIDENCE_THRESHOLD,
-                RS_OPTION_SR300_DYNAMIC_FPS,
+                RS_OPTION_F200_CONFIDENCE_THRESHOLD,                
                 RS_OPTION_SR300_AUTO_RANGE_ENABLE_MOTION_VERSUS_RANGE,
                 RS_OPTION_SR300_AUTO_RANGE_ENABLE_LASER,
                 RS_OPTION_SR300_AUTO_RANGE_MIN_MOTION_VERSUS_RANGE,
@@ -338,7 +337,7 @@ inline void test_sr300_option(rs_option option, std::initializer_list<int> value
     if(when & AFTER_START_DEVICE)
     {
         rs_enable_stream_preset(dev, RS_STREAM_DEPTH, RS_PRESET_BEST_QUALITY, require_no_error());
-        rs_start_device(dev, require_no_error());
+        rs_start_device(dev, rs_source::RS_SOURCE_VIDEO, require_no_error());
 
         // Currently, setting/getting options immediately after streaming frequently raises hardware errors
         // todo - Internally block or retry failed calls within the first few seconds after streaming
@@ -472,7 +471,7 @@ inline void test_sr300_command(rs_device *dev, std::vector<rs_option> options_li
     if (when & AFTER_START_DEVICE)
     {
         rs_enable_stream_preset(dev, RS_STREAM_DEPTH, RS_PRESET_BEST_QUALITY, require_no_error());
-        rs_start_device(dev, require_no_error());
+        rs_start_device(dev, rs_source::RS_SOURCE_VIDEO, require_no_error());
 
         // Currently, setting/getting options immediately after streaming frequently raises hardware errors
         // todo - Internally block or retry failed calls within the first few seconds after streaming
@@ -480,7 +479,7 @@ inline void test_sr300_command(rs_device *dev, std::vector<rs_option> options_li
         test_options(dev, options_list.data(), options_list.size(), good_values, bad_values, ret_values, expected_success_msg, expected_error_msg, write_cmd);
 
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        rs_stop_device(dev, require_no_error());
+        rs_stop_device(dev, rs_source::RS_SOURCE_VIDEO, require_no_error());
     }
 }
 
